@@ -37,22 +37,88 @@ function count(text, pattern) {
 }
 
 /**
+ * 识别合同类型：返回主类型与附加类型（混合合同，如租赁 + 维护服务）。
+ *
+ * 租赁必须同时出现“租赁 / 租期 / 租金”核心词；出现劳动合同类关键词时不再判为租赁。
+ *
+ * @param {string} text - 合同全文。
+ * @returns {{ primary: 'procurement'|'lease'|'service'|'unknown', types: string[] }} 类型结果。
+ */
+function detectContractTypes(text) {
+  const source = String(text ?? '')
+  if (/劳动合同|用人单位|劳动者|工资|社保/.test(source)) {
+    return { primary: 'unknown', types: ['unknown'] }
+  }
+
+  const leaseCore = /租赁|租期|租金/.test(source)
+  const lease = count(source, /租赁|出租|承租|押金|租金|租期|退租/g) * 2
+  const procurement = count(source, /采购|供货|供应商|采购方|验收|质保|到货/g) * 2
+  const service = count(source, /服务|委托|服务费|甲方委托|乙方提供服务/g)
+
+  let primary = 'unknown'
+  if (leaseCore && lease >= Math.max(procurement, service) && lease >= 4) primary = 'lease'
+  else if (procurement >= Math.max(lease, service) && procurement >= 4) primary = 'procurement'
+  else if (service >= 4) primary = 'service'
+
+  if (primary === 'unknown') return { primary, types: ['unknown'] }
+
+  const extras = []
+  if (primary !== 'lease' && leaseCore && lease >= 4) extras.push('lease')
+  if (
+    primary !== 'procurement'
+    && procurement >= 4
+    && count(source, /采购|供货|供应商|采购方|质保|到货/g) >= 2
+  ) {
+    extras.push('procurement')
+  }
+  if (primary !== 'service' && service >= 4 && count(source, /服务|委托/g) >= 2) {
+    extras.push('service')
+  }
+
+  return { primary, types: [primary, ...extras] }
+}
+
+/**
  * 识别合同类型（关键词打分，取最高分）。
  * @param {string} text - 合同全文。
  * @returns {'procurement'|'lease'|'service'|'unknown'} 类型。
  */
 export function detectContractType(text) {
-  const lease = count(text, /租赁|出租|承租|押金|租金|租期|退租/g) * 2
-  const procurement = count(text, /采购|供货|供应商|采购方|验收|质保|到货/g) * 2
-  const service = count(text, /服务|委托|服务费|甲方委托|乙方提供服务/g)
-  if (lease >= Math.max(procurement, service) && lease >= 4) return 'lease'
-  if (procurement >= Math.max(lease, service) && procurement >= 4) return 'procurement'
-  if (service >= 4) return 'service'
-  return 'unknown'
+  return detectContractTypes(text).primary
 }
 
 /**
- * 把合同切成条款：优先按“第 X 条 / 【标题】/ 序号”分行，退化时按空行分段。
+ * 无编号文本的兜底分段：按句子（。；换行）聚合成不超过 4 句或 300 字的块。
+ * @param {string} text - 合同全文。
+ * @returns {string[]} 分段结果。
+ */
+function splitBySentence(text) {
+  const units = text
+    .split(/(?<=[。；])|\n+/)
+    .map(unit => unit.trim())
+    .filter(Boolean)
+
+  const chunks = []
+  let buffer = ''
+  let sentences = 0
+  for (const unit of units) {
+    const joined = buffer ? `${buffer}${unit}` : unit
+    if (buffer && (sentences >= 4 || joined.length > 300)) {
+      chunks.push(buffer)
+      buffer = unit
+      sentences = 1
+      continue
+    }
+    buffer = joined
+    sentences += 1
+  }
+  if (buffer) chunks.push(buffer)
+  return chunks
+}
+
+/**
+ * 把合同切成条款：优先按“第 X 条 / 【标题】/ 序号”分行，退化时按空行分段，
+ * 仍分不出来时按句子兜底聚合，避免整份合同只算一条。
  * @param {string} text - 合同全文。
  * @returns {string[]} 条款文本。
  */
@@ -84,7 +150,9 @@ export function splitClauses(text) {
     .split(/\n\s*\n/)
     .map(part => part.trim())
     .filter(Boolean)
-  return paragraphs.length >= 3 ? paragraphs : [normalized.trim()].filter(Boolean)
+  if (paragraphs.length >= 3) return paragraphs
+
+  return splitBySentence(normalized)
 }
 
 /**
@@ -106,21 +174,65 @@ function excerptOf(segment, pattern) {
   return `${prefix}${body}${suffix}`.slice(0, EXCERPT_MAX)
 }
 
+/** 合同中的常见主体称谓。 */
+const PARTIES = ['甲方', '乙方', '出租方', '承租方', '采购方', '供应商', '服务方', '委托方']
+
+/**
+ * 按主体出现位置切分子句窗口：每个主体只看自己到下一个主体之间的文本，
+ * 避免把相邻主体的权利或义务算到它头上。
+ * @param {string} subclause - 子句文本。
+ * @returns {{ party: string, text: string }[]} 主体窗口。
+ */
+function partyWindows(subclause) {
+  const occurrences = []
+  for (const party of PARTIES) {
+    let index = subclause.indexOf(party)
+    while (index !== -1) {
+      occurrences.push({ party, index })
+      index = subclause.indexOf(party, index + party.length)
+    }
+  }
+  occurrences.sort((a, b) => a.index - b.index)
+  return occurrences.map((occurrence, i) => ({
+    party: occurrence.party,
+    text: subclause.slice(occurrence.index, i + 1 < occurrences.length ? occurrences[i + 1].index : undefined),
+  }))
+}
+
 /**
  * 判断某个条款是否只把解除权给了一方。
+ *
+ * 先按句号 / 分号 / 换行切子句，再按主体窗口逐句判断：只有确切的授权主体才算“有解除权”，
+ * 避免“甲方有权解除；乙方无权解除”被整段拼接后误判成双方对等。
+ *
  * @param {string} segment - 条款文本。
  * @returns {boolean} 是否单方解除。
  */
 function isOneSidedTermination(segment) {
-  const parties = ['甲方', '乙方', '出租方', '承租方', '采购方', '供应商', '服务方', '委托方']
-    .filter(party => segment.includes(party))
-  if (parties.length < 2) {
-    return /(有权|可以|可)[^。；\n]{0,8}(单方|随时)[^。；\n]{0,8}(解除|终止)/.test(segment)
+  const subclauses = String(segment).split(/[。；\n]/).map(part => part.trim()).filter(Boolean)
+  const mentioned = new Set()
+  const granted = new Set()
+  const denied = new Set()
+
+  for (const subclause of subclauses) {
+    const states = new Map()
+    for (const window of partyWindows(subclause)) {
+      mentioned.add(window.party)
+      const state = states.get(window.party) ?? { granted: false, denied: false }
+      if (/(无权|不得|不能)[^。；\n]{0,10}(解除|终止|退租)/.test(window.text)) state.denied = true
+      if (/(有权|可以|可)[^。；\n]{0,10}(解除|终止|退租)/.test(window.text)) state.granted = true
+      states.set(window.party, state)
+    }
+
+    const balanced = /(双方|均|各自)[^。；\n]{0,6}(有权|可以|可)[^。；\n]{0,8}(解除|终止|退租)/.test(subclause)
+    for (const [party, state] of states) {
+      if (state.denied) denied.add(party)
+      else if (state.granted || balanced) granted.add(party)
+    }
   }
-  const granted = parties.filter(party => new RegExp(
-    `${party}[^。；\\n]{0,18}(有权|可以|可)[^。；\\n]{0,10}(解除|终止)`,
-  ).test(segment))
-  return granted.length === 1 && /(解除|终止)/.test(segment)
+
+  if (granted.size === 1 && (mentioned.size >= 2 || denied.size > 0)) return true
+  return /(有权|可以|可)[^。；\n]{0,8}(单方|随时)[^。；\n]{0,8}(解除|终止)/.test(segment)
 }
 
 /**
@@ -241,10 +353,29 @@ const UNBALANCED_RULES = [
     pattern: /(违约金|赔偿|罚款|违约责任)/,
     evaluate: segment => {
       if (!/(违约金|赔偿|罚款|违约责任)/.test(segment)) return false
-      const penalized = ['乙方', '承租方', '供应商', '服务方'].filter(party => segment.includes(party))
-      const other = ['甲方', '出租方', '采购方', '委托方'].filter(party => segment.includes(party))
-      if (!penalized.length) return false
-      return !other.length
+      const subclauses = String(segment).split(/[。；\n]/).map(part => part.trim()).filter(Boolean)
+      const mentioned = new Set()
+      const liable = new Set()
+      const exempt = new Set()
+
+      for (const subclause of subclauses) {
+        for (const party of PARTIES) {
+          if (!subclause.includes(party)) continue
+          mentioned.add(party)
+          // 免责表述（不承担 / 免于 / 无需承担）说明这一方被排除在责任之外，不算“被施加责任”。
+          if (new RegExp(`${party}[^。；\\n]{0,20}(不承担|不负责|免于|无需|无须|不支付)[^。；\\n]{0,12}(违约金|赔偿责任|责任|罚款)`).test(subclause)) {
+            exempt.add(party)
+            continue
+          }
+          if (new RegExp(`${party}[^。；\\n]{0,10}(应|须|需|逾期|未|违约|按)[^。；\\n]{0,40}(违约金|赔偿|罚款|违约责任)`).test(subclause)) {
+            liable.add(party)
+          }
+        }
+      }
+
+      if (liable.size !== 1) return false
+      if (mentioned.size >= 2) return true
+      return exempt.size === 0
     },
     appliesTo: ['procurement', 'lease', 'service', 'unknown'],
     reason: '条款只列一方的违约金和赔偿责任，另一方违约没有对应后果，出了事很难追责。',
@@ -256,7 +387,7 @@ const MISSING_RULES = [
   {
     id: 'missing-dispute',
     label: '争议解决方式（仲裁或诉讼管辖）',
-    keywords: /争议[^。；\n]{0,10}(解决|处理)|仲裁|人民法院|诉讼/,
+    keywords: /仲裁|仲裁委员会|人民法院|法院|诉讼/,
     appliesTo: ['procurement', 'lease', 'service', 'unknown'],
   },
   {
@@ -304,13 +435,36 @@ const MISSING_RULES = [
 ]
 
 /**
- * 选取适用于当前合同类型的规则。
+ * 选取适用于当前合同类型的规则（类型集合取并集，支持混合合同）。
  * @param {object[]} rules - 规则数组。
- * @param {string} type - 合同类型。
+ * @param {string[]} types - 适用的合同类型集合。
  * @returns {object[]} 适用规则。
  */
-function rulesFor(rules, type) {
-  return rules.filter(rule => !rule.appliesTo || rule.appliesTo.includes(type))
+function rulesFor(rules, types) {
+  return rules.filter(rule => !rule.appliesTo || rule.appliesTo.some(type => types.includes(type)))
+}
+
+/**
+ * 摘录去重键：去掉条款编号前缀与截取省略号，便于识别同一句话的重复命中。
+ * @param {string} excerpt - 摘录文本。
+ * @returns {string} 去重键。
+ */
+function findingKey(excerpt) {
+  return excerpt
+    .replace(/^…/, '')
+    .replace(/^第[一二三四五六七八九十百零\d]+条\s*/, '')
+    .trim()
+}
+
+/** 同一条款内相同摘录命中时的保留优先级：数值越大越具体。 */
+const RULE_PRIORITY = {
+  'repair-one-sided': 5,
+  'deposit-no-refund': 4,
+  'vague-acceptance': 3,
+  'vague-payment-term': 3,
+  'one-sided-termination': 3,
+  'one-sided-liability': 3,
+  'unlimited-liability': 0,
 }
 
 /**
@@ -326,38 +480,66 @@ export function scanContract(text, options = {}) {
   }
   const clauses = splitClauses(source)
   const requested = options.contractType
-  const type = requested && requested !== 'auto' ? requested : detectContractType(source)
+  const typeInfo = requested && requested !== 'auto'
+    ? { primary: requested, types: [requested] }
+    : detectContractTypes(source)
+  const type = typeInfo.primary
+  const applicableTypes = typeInfo.types
 
-  const highRisk = []
-  const unbalanced = []
+  const candidates = []
+  const seen = new Map()
 
   const collect = (rules, bucket) => {
     for (const rule of rules) {
-      for (const clause of clauses) {
-        const matched = rule.evaluate ? rule.evaluate(clause) : new RegExp(rule.pattern.source, rule.pattern.flags).test(clause)
-        if (!matched) continue
-        bucket.push({
-          id: rule.id,
-          clause: rule.title,
-          excerpt: excerptOf(clause, rule.pattern),
-          reason: rule.reason,
-        })
-        break
+      const hits = []
+      clauses.forEach((clause, index) => {
+        let hitCount = 0
+        if (rule.evaluate) {
+          hitCount = rule.evaluate(clause) ? 1 : 0
+        } else {
+          const flags = rule.pattern.flags.includes('g') ? rule.pattern.flags : `${rule.pattern.flags}g`
+          hitCount = count(clause, new RegExp(rule.pattern.source, flags))
+        }
+        if (hitCount > 0) {
+          hits.push({ clauseIndex: index, excerpt: excerptOf(clause, rule.pattern), count: hitCount })
+        }
+      })
+      if (!hits.length) continue
+
+      const occurrences = hits.reduce((sum, hit) => sum + hit.count, 0)
+      const item = {
+        id: rule.id,
+        clause: rule.title,
+        excerpt: hits[0].excerpt,
+        reason: rule.reason,
+      }
+      if (occurrences > 1) item.occurrences = occurrences
+
+      const priority = RULE_PRIORITY[rule.id] ?? 1
+      const key = `${hits[0].clauseIndex}|${findingKey(item.excerpt)}`
+      const existing = seen.get(key)
+      if (existing === undefined) {
+        seen.set(key, candidates.length)
+        candidates.push({ bucket, item, priority })
+      } else if (priority > candidates[existing].priority) {
+        candidates[existing] = { bucket, item, priority }
       }
     }
   }
 
-  const appliesTo = type === 'unknown' ? ['procurement', 'lease', 'service'] : [type]
   const highRiskRules = [
     ...GENERAL_HIGH_RISK,
-    ...(appliesTo.includes('procurement') || appliesTo.includes('service') ? PROCUREMENT_HIGH_RISK : []),
-    ...(appliesTo.includes('lease') ? LEASE_HIGH_RISK : []),
+    ...(applicableTypes.includes('procurement') || applicableTypes.includes('service') ? PROCUREMENT_HIGH_RISK : []),
+    ...(applicableTypes.includes('lease') ? LEASE_HIGH_RISK : []),
   ]
-  collect(highRiskRules, highRisk)
-  collect(rulesFor(UNBALANCED_RULES, type), unbalanced)
+  collect(highRiskRules, 'high_risk')
+  collect(rulesFor(UNBALANCED_RULES, applicableTypes), 'unbalanced')
+
+  const highRisk = candidates.filter(candidate => candidate.bucket === 'high_risk').map(candidate => candidate.item)
+  const unbalanced = candidates.filter(candidate => candidate.bucket === 'unbalanced').map(candidate => candidate.item)
 
   const missing = MISSING_RULES
-    .filter(rule => rule.appliesTo.includes(type))
+    .filter(rule => rule.appliesTo.some(t => applicableTypes.includes(t)))
     .filter(rule => !rule.keywords.test(source))
     .map(rule => rule.label)
 
@@ -366,6 +548,7 @@ export function scanContract(text, options = {}) {
   return {
     contract_type: type,
     contract_type_label: TYPE_LABELS[type],
+    contract_types: applicableTypes,
     clause_count: clauses.length,
     rule_version: RULE_VERSION,
     high_risk: highRisk,
