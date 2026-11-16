@@ -18,6 +18,7 @@ const FINDING_SCHEMA = {
     clause: { type: 'string' },
     excerpt: { type: 'string' },
     reason: { type: 'string' },
+    occurrences: { type: 'number' },
   },
 }
 
@@ -27,6 +28,7 @@ const OUTPUT_SCHEMA = {
   properties: {
     contract_type: { type: 'string' },
     contract_type_label: { type: 'string' },
+    contract_types: { type: 'array', items: { type: 'string' } },
     clause_count: { type: 'number' },
     rule_version: { type: 'string' },
     high_risk: { type: 'array', items: FINDING_SCHEMA },
