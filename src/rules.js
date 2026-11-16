@@ -219,12 +219,12 @@ function isOneSidedTermination(segment) {
     for (const window of partyWindows(subclause)) {
       mentioned.add(window.party)
       const state = states.get(window.party) ?? { granted: false, denied: false }
-      if (/(无权|不得|不能)[^。；\n]{0,10}(解除|终止|退租)/.test(window.text)) state.denied = true
-      if (/(有权|可以|可)[^。；\n]{0,10}(解除|终止|退租)/.test(window.text)) state.granted = true
+      if (/(无权|不得|不能)[^。；\n]{0,10}(解除|终止|退租|解约)/.test(window.text)) state.denied = true
+      if (/(有权|可以|可)[^。；\n]{0,10}(解除|终止|退租|解约)/.test(window.text)) state.granted = true
       states.set(window.party, state)
     }
 
-    const balanced = /(双方|均|各自)[^。；\n]{0,6}(有权|可以|可)[^。；\n]{0,8}(解除|终止|退租)/.test(subclause)
+    const balanced = /(双方|均|各自)[^。；\n]{0,6}(有权|可以|可)[^。；\n]{0,8}(解除|终止|退租|解约)/.test(subclause)
     for (const [party, state] of states) {
       if (state.denied) denied.add(party)
       else if (state.granted || balanced) granted.add(party)
@@ -232,7 +232,32 @@ function isOneSidedTermination(segment) {
   }
 
   if (granted.size === 1 && (mentioned.size >= 2 || denied.size > 0)) return true
-  return /(有权|可以|可)[^。；\n]{0,8}(单方|随时)[^。；\n]{0,8}(解除|终止)/.test(segment)
+  return /(有权|可以|可)[^。；\n]{0,8}(单方|随时)[^。；\n]{0,8}(解除|终止|解约)/.test(segment)
+}
+
+/**
+ * 判断提前解约的代价是否只由一方承担：同一句里一方要扣押金 / 赔违约金，
+ * 另一方只需提前通知。只统计含「提前解约 / 解除 / 终止 / 退租」的子句窗口，
+ * 避免把同段里无关的权利义务算进来。
+ * @param {string} segment - 条款文本。
+ * @returns {boolean} 是否单边承担提前解约代价。
+ */
+function isOneSidedEarlyTerminationPenalty(segment) {
+  const subclauses = String(segment).split(/[。；\n]/).map(part => part.trim()).filter(Boolean)
+  const states = new Map()
+
+  for (const subclause of subclauses) {
+    if (!/提前[^。；\n]{0,8}(解约|解除|终止|退租)/.test(subclause)) continue
+    for (const window of partyWindows(subclause)) {
+      const state = states.get(window.party) ?? { penalty: false }
+      if (/(押金|保证金)[^。；\n]{0,8}(不退|不予退还|不退还|扣除|没收)|(违约金|赔偿|罚款)/.test(window.text)) state.penalty = true
+      states.set(window.party, state)
+    }
+  }
+
+  if (states.size < 2) return false
+  const values = [...states.values()]
+  return values.some(state => state.penalty) && values.some(state => !state.penalty)
 }
 
 /**
@@ -342,10 +367,18 @@ const UNBALANCED_RULES = [
   {
     id: 'one-sided-termination',
     title: '只有一方可以解除 / 提前终止',
-    pattern: /(解除|终止)/,
+    pattern: /(解除|终止|解约)/,
     evaluate: isOneSidedTermination,
     appliesTo: ['procurement', 'lease', 'service', 'unknown'],
     reason: '对方可以随时抽身，你却没有对应权利；应争取对等的提前通知期和解约条件。',
+  },
+  {
+    id: 'one-sided-early-termination-penalty',
+    title: '提前解约的代价只由一方承担',
+    pattern: /提前[^。；\n]{0,8}(解约|解除|终止|退租)/,
+    evaluate: isOneSidedEarlyTerminationPenalty,
+    appliesTo: ['lease', 'unknown'],
+    reason: '一方提前解约要扣押金或赔违约金，另一方只需提前通知；应约定对等的通知期与补偿标准。',
   },
   {
     id: 'one-sided-liability',
@@ -429,7 +462,7 @@ const MISSING_RULES = [
   {
     id: 'missing-early-exit',
     label: '提前解约条款',
-    keywords: /提前[^。；\n]{0,6}(解除|终止|退租)/,
+    keywords: /提前[^。；\n]{0,6}(解除|终止|退租|解约)/,
     appliesTo: ['lease'],
   },
 ]
