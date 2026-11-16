@@ -64,6 +64,41 @@ test('维修条款不再被误判为“违约责任只约束一方”，租期�
   assert.deepEqual(result.missing, ['争议解决方式（仲裁或诉讼管辖）'])
 })
 
+const ASYMMETRIC_EXIT_LEASE = `房屋租赁合同
+第一条 甲方将位于城西的房屋出租给乙方，租期一年，月租金 6000 元。
+第二条 乙方于签约时支付押金 18000 元，押金用于担保乙方履行本合同义务。
+第三条 租赁期内房屋主体与管道维修由甲方负责，室内日常损耗由乙方负责。
+第四条 乙方提前解约的，押金不予退还；甲方提前解约的，仅需提前七天通知。
+第五条 本合同到期后如双方均未提出异议，自动续期一年。
+第六条 因本合同产生的争议由甲方所在地人民法院管辖。`
+
+test('提前解约的代价只由一方承担时单列一项', () => {
+  const result = scanContract(ASYMMETRIC_EXIT_LEASE)
+  assert.equal(result.contract_type, 'lease')
+  const ids = result.unbalanced.map(item => item.id)
+  assert.ok(ids.includes('one-sided-early-termination-penalty'), `实际：${ids.join(', ')}`)
+})
+
+test('双方对等的提前解约不被误判', () => {
+  const text = ASYMMETRIC_EXIT_LEASE.replace(
+    '乙方提前解约的，押金不予退还；甲方提前解约的，仅需提前七天通知。',
+    '甲方或乙方提前解约的，应提前 30 日书面通知对方，押金按实际损失结算。',
+  )
+  const result = scanContract(text)
+  const ids = result.unbalanced.map(item => item.id)
+  assert.equal(ids.includes('one-sided-early-termination-penalty'), false, `实际：${ids.join(', ')}`)
+})
+
+test('“解约”与“解除”同义：单方解约权会被识别，且不再误报提前解约条款缺失', () => {
+  const text = `${LEASE}\n第八条 甲方有权提前解约，乙方无权解约。`
+  const result = scanContract(text)
+  assert.ok(result.unbalanced.some(item => item.id === 'one-sided-termination'))
+  assert.equal(result.missing.includes('提前解约条款'), false)
+
+  const clean = scanContract(CLEAN_LEASE.replace('提前解除', '提前解约'))
+  assert.equal(clean.missing.includes('提前解约条款'), false)
+})
+
 test('类型识别与手动覆盖', () => {
   assert.equal(detectContractType(PROCUREMENT), 'procurement')
   assert.equal(detectContractType(LEASE), 'lease')
