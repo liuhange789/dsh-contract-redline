@@ -66,6 +66,8 @@ contract_scan(
 声明：仅为条款位置与风险提示，不构成法律意见，不判断合同是否有效，不替代律师；重要合同请交由专业人士审阅。
 ```
 
+结构化字段（`output.schema` 全量声明）：`contract_type` / `contract_type_label`（主类型键与中文名）、`contract_types`（混合合同实际适用的类型集合）、`clause_count`（切分出的条款数）、`rule_version`（规则集版本，当前 `2026.11`）、`high_risk` / `unbalanced`（每条含条款标题、原文摘录与理由）、`missing`（缺失条款名数组）、`summary`（一句话结论）、`disclaimer`（免责声明）、`report`（会话里渲染的完整清单文本）。
+
 ## 规则集（2026.11）
 
 **通用高风险**
