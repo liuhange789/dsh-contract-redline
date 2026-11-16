@@ -1,6 +1,6 @@
 {
   "name": "@liuhange/dsh-contract-redline",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Contract risk quick-scan for small businesses: paste a procurement, lease or service contract and get a checklist of high-risk clauses, one-sided obligations and missing key clauses — rule-based, local-only, no legal advice. 合同风险速查：粘贴合同文本，逐条标出高风险条款、权利义务不对等与缺失的关键条款。",
   "keywords": [
     "dsh",
