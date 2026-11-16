@@ -1,0 +1,3 @@
+- insert:
+    - id: contract-redline
+      name: '@liuhange/dsh-contract-redline'
