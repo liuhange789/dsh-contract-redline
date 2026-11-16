@@ -250,3 +250,14 @@ test('回归：同一句同摘录去重，repair-one-sided 优先于 unlimited-l
   assert.ok(ids.includes('repair-one-sided'), '未保留更具体的维修规则')
   assert.ok(!ids.includes('unlimited-liability'), '同一句重复报了责任过宽')
 })
+
+test('回归：“承担全部费用”不再被误报为责任无上限（实测回归）', () => {
+  const text = [
+    '第一条 乙方应按甲方要求提供服务，服务内容以双方确认的清单为准。',
+    '第二条 乙方应承担全部费用，包括但不限于差旅与材料支出。',
+    '第三条 甲方所在地人民法院管辖，双方均可提前 30 日书面解除。',
+    '第四条 任何一方违约的，按合同金额 10% 支付违约金。',
+  ].join('\n')
+  const result = scanContract(text)
+  assert.ok(!result.high_risk.some(item => item.id === 'unlimited-liability'))
+})
